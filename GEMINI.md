@@ -43,5 +43,5 @@ This document provides essential context for AI models interacting with this pro
 
 * **Contribution Guidelines:** No explicit `CONTRIBUTING.md` found. Follow standard open-source contribution practices: create feature branches, submit pull requests, and ensure code is well-tested.
 * **Security:** Always prioritize security. Do not hardcode sensitive information. Ensure any network-related changes are secure and properly vetted.
-* **Dependencies:** When adding new dependencies, update `default.nix` for Nix packages and `Cargo.toml` for Rust dependencies.
+* **Dependencies:** When adding new dependencies, use `cargo add` for Rust dependencies and update `default.nix` for Nix packages.
 * **Commit Messages:** Follow a clear and descriptive commit message style. Use Conventional Commits for consistency.
