@@ -3,7 +3,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let url = url::Url::parse("ws://127.0.0.1:8080/")?;
+    let url = url::Url::parse("ws://127.0.0.1:8081/")?;
 
     let (mut ws_stream, _) = tokio_tungstenite::connect_async(url).await?;
 

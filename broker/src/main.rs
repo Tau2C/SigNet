@@ -4,7 +4,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "127.0.0.1:8080";
+    let addr = "127.0.0.1:8081";
     let listener = TcpListener::bind(&addr).await?;
     println!("Broker listening on: {}", addr);
 
