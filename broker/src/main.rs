@@ -41,7 +41,7 @@ struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Config { address: "127.0.0.1:8081".into() }
+        Config { address: "0.0.0.0:8081".into() }
     }
 }
 
