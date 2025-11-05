@@ -1,136 +1,252 @@
-use clap::Parser;
-use figment::{
-    providers::{Env, Format, Toml, Serialized},
-    Figment, Provider, Profile, Metadata, Error,
-};
-use figment::value::{Dict, Map};
+// broker.rs
 use futures_util::{SinkExt, StreamExt};
-use serde::{Deserialize, Serialize};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::broadcast;
-use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use ring::signature;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+use std::{fs, path};
+use tokio::net::TcpListener;
+use tokio::sync::{Mutex, mpsc};
 use tokio_tungstenite::tungstenite::Message;
+use webpki::{EndEntityCert, Time, TrustAnchor};
+use x509_parser::prelude::*;
 
-#[derive(Parser, Debug, Serialize, Deserialize)]
-#[command(version, about, long_about = None)]
-struct Cli {
-    /// Address to listen on
-    #[arg(short, long)]
-    address: Option<String>,
-}
+use signet::{self, Frame};
 
-impl Provider for Cli {
-    fn metadata(&self) -> Metadata {
-        Metadata::named("Command-Line Arguments")
-    }
-
-    fn data(&self) -> Result<Map<Profile, Dict>, Error> {
-        let mut data = Dict::new();
-        if let Some(address) = &self.address {
-            data.insert("address".into(), address.clone().into());
-        }
-        Ok(Map::from([(Profile::Default, data)]))
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Config {
-    address: String,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Config { address: "0.0.0.0:8081".into() }
-    }
-}
+type Tx = mpsc::UnboundedSender<Message>;
+type Clients = Arc<Mutex<HashMap<String, Tx>>>;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+async fn main() -> anyhow::Result<()> {
+    let addr = "0.0.0.0";
+    let port = "8081";
+    let listener = TcpListener::bind(format!("{}:{}", addr, port)).await?;
+    println!("Broker listening on {}", addr);
 
-    let config: Config = Figment::new()
-        .merge(Serialized::defaults(Config::default()))
-        .merge(Toml::file("Broker.toml").nested())
-        .merge(Env::prefixed("BROKER_").split("__"))
-        .merge(cli)
-        .extract()?;
+    let clients: Clients = Arc::new(Mutex::new(HashMap::new()));
 
-    let listener = TcpListener::bind(&config.address).await?;
-    println!("Broker listening on: {}", &config.address);
-
-    let (shutdown_tx, _) = broadcast::channel(1);
-
-    let server_future = async move {
-        loop {
-            let shutdown_rx = shutdown_tx.subscribe();
-            tokio::select! {
-                Ok((stream, _)) = listener.accept() => {
-                    tokio::spawn(handle_connection(stream, shutdown_rx));
+    while let Ok((stream, _)) = listener.accept().await {
+        let clients = clients.clone();
+        tokio::spawn(async move {
+            let ws = match tokio_tungstenite::accept_async(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("ws handshake err: {}", e);
+                    return;
                 }
-                _ = tokio::signal::ctrl_c() => {
-                    println!("\nCtrl+C received, sending shutdown signal.");
-                    shutdown_tx.send(()).unwrap();
-                    break;
+            };
+            println!("New ws connection");
+
+            let (mut ws_tx, mut ws_rx) = ws.split();
+            // create outbound queue so other tasks can send to this client
+            let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+            // spawn writer task
+            let write_task = tokio::spawn(async move {
+                while let Some(msg) = rx.recv().await {
+                    if ws_tx.send(msg).await.is_err() {
+                        break;
+                    }
+                }
+            });
+
+            // We need the registered id to store in map
+            let mut my_id: Option<String> = None;
+
+            while let Some(msg) = ws_rx.next().await {
+                match msg {
+                    Ok(Message::Text(t)) => {
+                        match serde_json::from_str::<Frame>(&t) {
+                            Ok(frame) => {
+                                match frame {
+                                    Frame::Register { id: client_pem } => {
+                                        // Load CA certificate
+                                        let path = path::absolute("ca/ca.crt").unwrap();
+                                        println!("{}", path.to_str().unwrap());
+                                        let ca_pem_bytes = match fs::read(path) {
+                                            Ok(p) => p,
+                                            Err(e) => {
+                                                eprintln!("Failed to read CA certificate: {}", e);
+                                                return;
+                                            }
+                                        };
+                                        let ca_pem = match pem::parse_x509_pem(&ca_pem_bytes) {
+                                            Ok(p) => p,
+                                            Err(e) => {
+                                                eprintln!("Failed to parse CA PEM: {:?}", e);
+                                                return;
+                                            }
+                                        };
+                                        let ca_anchor = match webpki::TrustAnchor::try_from_cert_der(
+                                            &ca_pem.1.contents,
+                                        ) {
+                                            Ok(a) => a,
+                                            Err(e) => {
+                                                eprintln!("Failed to parse CA DER: {:?}", e);
+                                                return;
+                                            }
+                                        };
+                                        let anchors = webpki::TlsClientTrustAnchors(&[ca_anchor]);
+
+                                        // Load client certificate
+                                        let client_pem_bytes = client_pem.as_bytes();
+                                        let client_pem = match pem::parse_x509_pem(client_pem_bytes)
+                                        {
+                                            Ok(p) => p,
+                                            Err(e) => {
+                                                eprintln!("Failed to parse client PEM: {:?}", e);
+                                                return;
+                                            }
+                                        };
+                                        let client_cert = match webpki::EndEntityCert::try_from(
+                                            &client_pem.1.contents[..],
+                                        ) {
+                                            Ok(c) => c,
+                                            Err(e) => {
+                                                eprintln!("Failed to parse client DER: {:?}", e);
+                                                return;
+                                            }
+                                        };
+
+                                        // Convert current time
+                                        let now = match SystemTime::now().duration_since(UNIX_EPOCH)
+                                        {
+                                            Ok(dur) => {
+                                                Time::from_seconds_since_unix_epoch(dur.as_secs())
+                                            }
+                                            Err(_) => {
+                                                eprintln!("System time is before UNIX epoch");
+                                                return;
+                                            }
+                                        };
+
+                                        let algs: &[&webpki::SignatureAlgorithm] =
+                                            &[&webpki::ECDSA_P256_SHA256]; // supported EC algorithms
+
+                                        match client_cert.verify_is_valid_tls_client_cert(
+                                            algs,     // supported signature algorithms
+                                            &anchors, // TlsClientTrustAnchors
+                                            &[],      // no intermediates
+                                            now,      // current webpki::Time
+                                        ) {
+                                            Ok(_) => {
+                                                println!(
+                                                    "Client certificate verified: registration accepted"
+                                                );
+                                                let id = uuid::Uuid::new_v4().to_string();
+                                                my_id = Some(id.clone());
+                                                clients.lock().await.insert(id.clone(), tx.clone());
+
+                                                // Acknowledge registration
+                                                let ack = Frame::Register { id };
+                                                if let Ok(txt) = serde_json::to_string(&ack) {
+                                                    let _ = tx.send(Message::Text(txt));
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "Client certificate not signed by trusted CA: {:?}",
+                                                    e
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+
+                                    // Only allow these frames if the client has registered
+                                    Frame::Open {
+                                        conn_id,
+                                        target,
+                                        port,
+                                    } => {
+                                        if my_id.is_none() {
+                                            eprintln!(
+                                                "Client sent Open frame before registration. Ignoring."
+                                            );
+                                            continue;
+                                        }
+                                        println!("Open request {} -> {}:{}", conn_id, target, port);
+
+                                        if let Some(dest) = clients.lock().await.get(&target) {
+                                            let f = Frame::Open {
+                                                conn_id,
+                                                target: "".into(),
+                                                port,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                let _ = dest.send(Message::Text(s));
+                                            }
+                                        } else {
+                                            eprintln!("Target {} not found", target);
+                                        }
+                                    }
+
+                                    Frame::Data { conn_id, data } => {
+                                        if my_id.is_none() {
+                                            eprintln!(
+                                                "Client sent Data frame before registration. Ignoring."
+                                            );
+                                            continue;
+                                        }
+                                        if let Some((_, to, _)) = parse_conn(&conn_id) {
+                                            if let Some(dest) = clients.lock().await.get(&to) {
+                                                let f = Frame::Data {
+                                                    conn_id: conn_id.clone(),
+                                                    data,
+                                                };
+                                                if let Ok(s) = serde_json::to_string(&f) {
+                                                    let _ = dest.send(Message::Text(s));
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Frame::Close { conn_id } => {
+                                        if my_id.is_none() {
+                                            eprintln!(
+                                                "Client sent Close frame before registration. Ignoring."
+                                            );
+                                            continue;
+                                        }
+                                        if let Some((_, to, _)) = parse_conn(&conn_id) {
+                                            if let Some(dest) = clients.lock().await.get(&to) {
+                                                let f = Frame::Close {
+                                                    conn_id: conn_id.clone(),
+                                                };
+                                                if let Ok(s) = serde_json::to_string(&f) {
+                                                    let _ = dest.send(Message::Text(s));
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => eprintln!("bad frame: {} | {}", e, t),
+                        }
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
                 }
             }
-        }
-    };
 
-    server_future.await;
+            // cleanup
+            if let Some(id) = my_id {
+                clients.lock().await.remove(&id);
+                println!("Client {} disconnected", id);
+            }
+
+            let _ = write_task.await;
+        });
+    }
 
     Ok(())
 }
 
-async fn handle_connection(raw_stream: TcpStream, mut shutdown_rx: broadcast::Receiver<()>) {
-    println!("Incoming TCP connection from: {}", raw_stream.peer_addr().unwrap());
-
-    let mut ws_stream = match tokio_tungstenite::accept_async(raw_stream).await {
-        Ok(ws) => ws,
-        Err(e) => {
-            eprintln!("Error during WebSocket handshake: {}", e);
-            return;
-        }
-    };
-
-    println!("WebSocket connection established.");
-
-    loop {
-        tokio::select! {
-            Some(message) = ws_stream.next() => {
-                match message {
-                    Ok(msg) => {
-                        if msg.is_text() || msg.is_binary() {
-                            println!("Received a message: {:?}", msg);
-                            // Echo the message back for now
-                            if let Err(e) = ws_stream.send(msg).await {
-                                eprintln!("Error sending message: {}", e);
-                                break;
-                            }
-                        } else if msg.is_close() {
-                            println!("Client disconnected.");
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Error receiving message: {}", e);
-                        break;
-                    }
-                }
-            }
-            _ = shutdown_rx.recv() => {
-                println!("Shutdown signal received, closing connection.");
-                // To tell the client to reconnect, use CloseCode::Restart
-                // To tell the client not to reconnect, use CloseCode::Normal
-                let close_frame = CloseFrame {
-                    code: CloseCode::Normal,
-                    reason: "Server is shutting down".into(),
-                };
-                if let Err(e) = ws_stream.send(Message::Close(Some(close_frame))).await {
-                    eprintln!("Error sending close frame: {}", e);
-                }
-                break;
-            }
-        }
+fn parse_conn(conn: &str) -> Option<(String, String, String)> {
+    // expected "<from>::<to>::<uuid>"
+    let parts: Vec<&str> = conn.split("::").collect();
+    if parts.len() == 3 {
+        Some((parts[0].into(), parts[1].into(), parts[2].into()))
+    } else {
+        None
     }
 }

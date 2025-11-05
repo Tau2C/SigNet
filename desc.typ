@@ -62,20 +62,20 @@ Designed to work on *NixOS* (home laptop) and *Termux/Nix-on-Droid* (tablet).
 - Implement agents capable of TCP relaying through broker.
 - Verify basic connectivity (tablet → home SSH).
 
-=== Phase 2 — Multiplexing
-
-- Integrate `yamux` for multi-stream tunneling.
-- Add SOCKS5 proxy support.
-
-=== Phase 3 — P2P Support
+=== Phase 2 — P2P Support
 
 - Add WebRTC ICE/STUN to attempt direct connections.
 - Integrate fallback relay for non-traversable NATs.
 
-=== Phase 4 — Security and Config
+=== Phase 3 — Security and Config
 
 - Implement Ed25519 identity system and signed authentication.
 - Add ACL configuration and encrypted config files.
+
+=== Phase 4 — Multiplexing
+
+- Integrate `yamux` for multi-stream tunneling.
+- Add SOCKS5 proxy support.
 
 === Phase 5 — Packaging
 

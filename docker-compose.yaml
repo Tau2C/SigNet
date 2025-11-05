@@ -1,6 +1,6 @@
 services:
   broker:
-    image: xblackxsnakex/tau2c:signet-broker_latest
+    image: signet-broker:latest
     # ports:
       # - "8081:8081"
     networks:
