@@ -1,16 +1,16 @@
 services:
   broker:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: xblackxsnakex/tau2c:signet-broker_latest
+    # ports:
+      # - "8081:8081"
     networks:
       - backend
 
   nginx:
     build: ./server/nginx
     ports:
-      - "80:80"
-      - "443:443"
+      - "20209:80"
+      - "30209:443"
     networks:
       - frontend
       - backend
@@ -21,4 +21,3 @@ networks:
   frontend:
     driver: bridge
   backend:
-    driver: bridge
