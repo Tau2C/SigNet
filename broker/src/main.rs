@@ -1,15 +1,63 @@
-use futures_util::{ SinkExt, StreamExt };
+use clap::Parser;
+use figment::{
+    providers::{Env, Format, Toml, Serialized},
+    Figment, Provider, Profile, Metadata, Error,
+};
+use figment::value::{Dict, Map};
+use futures_util::{SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::CloseFrame;
 use tokio_tungstenite::tungstenite::Message;
 
+#[derive(Parser, Debug, Serialize, Deserialize)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Address to listen on
+    #[arg(short, long)]
+    address: Option<String>,
+}
+
+impl Provider for Cli {
+    fn metadata(&self) -> Metadata {
+        Metadata::named("Command-Line Arguments")
+    }
+
+    fn data(&self) -> Result<Map<Profile, Dict>, Error> {
+        let mut data = Dict::new();
+        if let Some(address) = &self.address {
+            data.insert("address".into(), address.clone().into());
+        }
+        Ok(Map::from([(Profile::Default, data)]))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct Config {
+    address: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config { address: "127.0.0.1:8081".into() }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr = "127.0.0.1:8081";
-    let listener = TcpListener::bind(&addr).await?;
-    println!("Broker listening on: {}", addr);
+    let cli = Cli::parse();
+
+    let config: Config = Figment::new()
+        .merge(Serialized::defaults(Config::default()))
+        .merge(Toml::file("Broker.toml").nested())
+        .merge(Env::prefixed("BROKER_").split("__"))
+        .merge(cli)
+        .extract()?;
+
+    let listener = TcpListener::bind(&config.address).await?;
+    println!("Broker listening on: {}", &config.address);
 
     let (shutdown_tx, _) = broadcast::channel(1);
 
