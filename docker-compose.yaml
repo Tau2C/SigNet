@@ -1,0 +1,24 @@
+services:
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    networks:
+      - backend
+
+  nginx:
+    build: ./server/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - frontend
+      - backend
+    depends_on:
+      - broker
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
