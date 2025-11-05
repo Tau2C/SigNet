@@ -1,12 +1,27 @@
+use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::Message;
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Address of the broker
+    #[arg(short, long, default_value = "ws://127.0.0.1:8081/")]
+    broker: String,
+
+    /// Keyfile for authentication
+    #[arg(short, long)]
+    keyfile: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let url = url::Url::parse("ws://127.0.0.1:8081/")?;
+    let args = Args::parse();
+
+    let url = url::Url::parse(&args.broker)?;
 
     loop {
         println!("Attempting to connect to broker...");
